@@ -6,6 +6,7 @@ const session = require('express-session');
 
 require('./db'); // ensures DB + missions are initialized/seeded
 
+const { UPLOAD_DIR } = require('./config');
 const authRoutes = require('./routes/auth');
 const missionRoutes = require('./routes/missions');
 const leaderboardRoutes = require('./routes/leaderboard');
@@ -39,6 +40,7 @@ app.use('/api/auth', authRoutes);
 app.use('/api/missions', missionRoutes);
 app.use('/api/leaderboard', leaderboardRoutes);
 
+app.use('/uploads', express.static(UPLOAD_DIR));
 app.use(express.static(path.join(__dirname, '..', 'public')));
 
 app.use((req, res) => {

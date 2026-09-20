@@ -5,10 +5,10 @@ const crypto = require('crypto');
 const multer = require('multer');
 const db = require('../db');
 const { requireAuth } = require('../middleware/auth');
+const { UPLOAD_DIR } = require('../config');
 
 const router = express.Router();
 
-const UPLOAD_DIR = path.join(__dirname, '..', '..', 'public', 'uploads');
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
 const storage = multer.diskStorage({

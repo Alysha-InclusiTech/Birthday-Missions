@@ -95,6 +95,7 @@
           <input type="file" id="proof-file" accept="image/*,video/*" required />
         </label>
         <div id="file-preview" class="file-preview hidden"></div>
+        <div id="upload-progress-wrap" class="progress-track hidden"><div id="upload-progress-fill" class="progress-fill"></div></div>
         <button type="submit" id="submit-proof-btn">Submit Proof</button>
       </form>
       <p id="modal-error" class="error hidden"></p>
@@ -110,6 +111,7 @@
     </div>
   </div>
 
+  <script src="/vendor/blob-client.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>

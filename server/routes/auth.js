@@ -1,12 +1,14 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
-const db = require('../db');
+const { sql, ensureInitialized } = require('../db');
+const { signToken, setAuthCookie, clearAuthCookie, parseCookies, verifyToken, COOKIE_NAME } = require('../lib/auth');
 
 const router = express.Router();
 
 const USERNAME_RE = /^[a-zA-Z0-9_ ]{2,30}$/;
 
 router.post('/register', async (req, res) => {
+  await ensureInitialized();
   const { username, password } = req.body || {};
 
   if (typeof username !== 'string' || !USERNAME_RE.test(username.trim())) {
@@ -17,28 +19,35 @@ router.post('/register', async (req, res) => {
   }
 
   const cleanUsername = username.trim();
-  const existing = db.prepare('SELECT id FROM users WHERE username = ?').get(cleanUsername);
-  if (existing) {
-    return res.status(409).json({ error: 'That username is already taken.' });
+  const passwordHash = await bcrypt.hash(password, 10);
+
+  let user;
+  try {
+    const rows = await sql`
+      INSERT INTO users (username, password_hash) VALUES (${cleanUsername}, ${passwordHash})
+      RETURNING id, username
+    `;
+    user = rows[0];
+  } catch (err) {
+    if (err.code === '23505') {
+      return res.status(409).json({ error: 'That username is already taken.' });
+    }
+    throw err;
   }
 
-  const passwordHash = await bcrypt.hash(password, 10);
-  const result = db
-    .prepare('INSERT INTO users (username, password_hash) VALUES (?, ?)')
-    .run(cleanUsername, passwordHash);
-
-  req.session.userId = result.lastInsertRowid;
-  req.session.username = cleanUsername;
-  res.json({ id: result.lastInsertRowid, username: cleanUsername });
+  setAuthCookie(res, signToken(user));
+  res.json(user);
 });
 
 router.post('/login', async (req, res) => {
+  await ensureInitialized();
   const { username, password } = req.body || {};
   if (typeof username !== 'string' || typeof password !== 'string') {
     return res.status(400).json({ error: 'Username and password are required.' });
   }
 
-  const user = db.prepare('SELECT * FROM users WHERE username = ?').get(username.trim());
+  const rows = await sql`SELECT * FROM users WHERE username = ${username.trim()}`;
+  const user = rows[0];
   if (!user) {
     return res.status(401).json({ error: 'Invalid username or password.' });
   }
@@ -48,23 +57,22 @@ router.post('/login', async (req, res) => {
     return res.status(401).json({ error: 'Invalid username or password.' });
   }
 
-  req.session.userId = user.id;
-  req.session.username = user.username;
+  setAuthCookie(res, signToken(user));
   res.json({ id: user.id, username: user.username });
 });
 
 router.post('/logout', (req, res) => {
-  req.session.destroy(() => {
-    res.clearCookie('connect.sid');
-    res.json({ ok: true });
-  });
+  clearAuthCookie(res);
+  res.json({ ok: true });
 });
 
 router.get('/me', (req, res) => {
-  if (!req.session || !req.session.userId) {
+  const cookies = parseCookies(req);
+  const payload = cookies[COOKIE_NAME] && verifyToken(cookies[COOKIE_NAME]);
+  if (!payload) {
     return res.status(401).json({ error: 'Not logged in' });
   }
-  res.json({ id: req.session.userId, username: req.session.username });
+  res.json({ id: payload.id, username: payload.username });
 });
 
 module.exports = router;

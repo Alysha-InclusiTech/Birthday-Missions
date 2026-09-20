@@ -1,8 +1,5 @@
 node_modules/
-data.sqlite
-data.sqlite-journal
-data.sqlite-wal
-data.sqlite-shm
-.session-secret
-/uploads/
 .env
+.env*.local
+.vercel
+public/vendor/blob-client.js

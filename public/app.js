@@ -206,13 +206,31 @@ el('submit-form').addEventListener('submit', async (e) => {
   if (!file) return;
 
   const btn = el('submit-proof-btn');
+  const progressWrap = el('upload-progress-wrap');
+  const progressFill = el('upload-progress-fill');
   btn.disabled = true;
   btn.textContent = 'Uploading…';
+  progressWrap.classList.remove('hidden');
+  progressFill.style.width = '0%';
 
   try {
-    const formData = new FormData();
-    formData.append('proof', file);
-    await api(`/missions/${activeMission.id}/submit`, { method: 'POST', body: formData });
+    // Uploads straight to Blob storage from the browser (bypassing our
+    // server, which can't handle large video bodies), then tells our API
+    // the resulting URL so it can record the submission and award points.
+    const blob = await VercelBlobClient.upload(`${activeMission.id}-${Date.now()}-${file.name}`, file, {
+      access: 'public',
+      handleUploadUrl: '/api/missions/upload-token',
+      multipart: file.size > 8 * 1024 * 1024,
+      onUploadProgress: ({ percentage }) => {
+        progressFill.style.width = `${percentage}%`;
+      },
+    });
+
+    const mediaType = file.type.startsWith('video') ? 'video' : 'image';
+    await api(`/missions/${activeMission.id}/submit`, {
+      method: 'POST',
+      body: JSON.stringify({ blobUrl: blob.url, mediaType }),
+    });
     el('submit-modal').classList.add('hidden');
     await loadMissions();
   } catch (err) {
@@ -221,6 +239,7 @@ el('submit-form').addEventListener('submit', async (e) => {
   } finally {
     btn.disabled = false;
     btn.textContent = 'Submit Proof';
+    progressWrap.classList.add('hidden');
   }
 });
 

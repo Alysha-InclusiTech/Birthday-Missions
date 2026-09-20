@@ -1,43 +1,18 @@
 const express = require('express');
-const path = require('path');
-const fs = require('fs');
-const crypto = require('crypto');
-const multer = require('multer');
-const db = require('../db');
+const { handleUpload } = require('@vercel/blob/client');
+const { sql, ensureInitialized } = require('../db');
 const { requireAuth } = require('../middleware/auth');
-const { UPLOAD_DIR } = require('../config');
 
 const router = express.Router();
-
-fs.mkdirSync(UPLOAD_DIR, { recursive: true });
-
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, UPLOAD_DIR),
-  filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname).toLowerCase();
-    cb(null, `${crypto.randomUUID()}${ext}`);
-  },
-});
-
-const ALLOWED_MIME = /^(image|video)\//;
-const upload = multer({
-  storage,
-  limits: { fileSize: 100 * 1024 * 1024 }, // 100MB
-  fileFilter: (req, file, cb) => {
-    if (!ALLOWED_MIME.test(file.mimetype)) {
-      return cb(new Error('Only image or video files are allowed.'));
-    }
-    cb(null, true);
-  },
-});
+const MAX_UPLOAD_BYTES = 100 * 1024 * 1024; // 100MB
 
 router.use(requireAuth);
 
-router.get('/', (req, res) => {
-  const missions = db.prepare('SELECT * FROM missions ORDER BY number').all();
-  const submissions = db
-    .prepare('SELECT * FROM submissions WHERE user_id = ?')
-    .all(req.session.userId);
+router.get('/', async (req, res) => {
+  await ensureInitialized();
+
+  const missions = await sql`SELECT * FROM missions ORDER BY number`;
+  const submissions = await sql`SELECT * FROM submissions WHERE user_id = ${req.user.id}`;
   const submissionByMission = new Map(submissions.map((s) => [s.mission_id, s]));
 
   const payload = missions.map((m) => {
@@ -50,49 +25,77 @@ router.get('/', (req, res) => {
       tag: m.tag,
       points: m.points,
       completed: Boolean(sub),
-      proof: sub
-        ? { filePath: `/uploads/${path.basename(sub.file_path)}`, mediaType: sub.media_type, submittedAt: sub.submitted_at }
-        : null,
+      proof: sub ? { filePath: sub.file_url, mediaType: sub.media_type, submittedAt: sub.submitted_at } : null,
     };
   });
 
   res.json(payload);
 });
 
-router.post('/:id/submit', (req, res, next) => {
-  upload.single('proof')(req, res, (err) => {
-    if (err) {
-      return res.status(400).json({ error: err.message });
-    }
-    next();
-  });
-}, (req, res) => {
-  const missionId = Number(req.params.id);
-  const mission = db.prepare('SELECT * FROM missions WHERE id = ?').get(missionId);
-  if (!mission) {
-    if (req.file) fs.unlink(req.file.path, () => {});
-    return res.status(404).json({ error: 'Mission not found.' });
+// Issues a short-lived, scoped token so the browser can upload the proof
+// file directly to Vercel Blob storage, bypassing this server (and its
+// request-size limits) entirely for large photo/video files.
+router.post('/upload-token', async (req, res) => {
+  try {
+    const jsonResponse = await handleUpload({
+      body: req.body,
+      request: req,
+      onBeforeGenerateToken: async () => ({
+        allowedContentTypes: ['image/*', 'video/*'],
+        maximumSizeInBytes: MAX_UPLOAD_BYTES,
+        addRandomSuffix: true,
+      }),
+    });
+    res.json(jsonResponse);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
   }
-  if (!req.file) {
-    return res.status(400).json({ error: 'A photo or video proof file is required.' });
+});
+
+router.post('/:id/submit', async (req, res) => {
+  await ensureInitialized();
+
+  const missionId = Number(req.params.id);
+  const { blobUrl, mediaType } = req.body || {};
+
+  if (typeof blobUrl !== 'string' || !blobUrl.startsWith('https://')) {
+    return res.status(400).json({ error: 'A valid uploaded proof URL is required.' });
+  }
+  if (mediaType !== 'image' && mediaType !== 'video') {
+    return res.status(400).json({ error: 'mediaType must be "image" or "video".' });
   }
 
-  const existing = db
-    .prepare('SELECT id FROM submissions WHERE user_id = ? AND mission_id = ?')
-    .get(req.session.userId, missionId);
-  if (existing) {
-    fs.unlink(req.file.path, () => {});
+  const missionRows = await sql`SELECT * FROM missions WHERE id = ${missionId}`;
+  const mission = missionRows[0];
+  if (!mission) {
+    return res.status(404).json({ error: 'Mission not found.' });
+  }
+
+  const existingRows = await sql`
+    SELECT id FROM submissions WHERE user_id = ${req.user.id} AND mission_id = ${missionId}
+  `;
+  if (existingRows[0]) {
     return res.status(409).json({ error: 'You already completed this mission.' });
   }
 
-  const mediaType = req.file.mimetype.startsWith('video') ? 'video' : 'image';
-  db.prepare(
-    'INSERT INTO submissions (user_id, mission_id, file_path, media_type) VALUES (?, ?, ?, ?)'
-  ).run(req.session.userId, missionId, req.file.filename, mediaType);
+  let submittedAt;
+  try {
+    const inserted = await sql`
+      INSERT INTO submissions (user_id, mission_id, file_url, media_type)
+      VALUES (${req.user.id}, ${missionId}, ${blobUrl}, ${mediaType})
+      RETURNING submitted_at
+    `;
+    submittedAt = inserted[0].submitted_at;
+  } catch (err) {
+    if (err.code === '23505') {
+      return res.status(409).json({ error: 'You already completed this mission.' });
+    }
+    throw err;
+  }
 
   res.json({
     ok: true,
-    proof: { filePath: `/uploads/${req.file.filename}`, mediaType, submittedAt: new Date().toISOString() },
+    proof: { filePath: blobUrl, mediaType, submittedAt },
     pointsAwarded: mission.points,
   });
 });

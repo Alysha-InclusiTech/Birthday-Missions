@@ -7,26 +7,45 @@ compete on a live leaderboard.
 
 ## Stack
 
-Self-contained Node.js app, no external services required:
+Built to run on Vercel, which has no persistent disk — so storage lives in
+managed services instead of local files:
 
-- **Backend:** Express + better-sqlite3 (file-based SQL database, `data.sqlite`)
-- **Auth:** Real accounts with hashed passwords (bcryptjs) + server-side sessions
-- **Uploads:** Multer stores proof photos/videos on disk under `uploads/`
-- **Frontend:** Plain HTML/CSS/JS (no build step)
+- **Backend:** Express, deployed as a single Vercel serverless function (`api/index.js`)
+- **Database:** Postgres via [Neon](https://neon.tech) (`@neondatabase/serverless`) — connect it through Vercel's **Storage** tab
+- **Auth:** Real accounts with hashed passwords (bcryptjs) + signed JWT cookies (stateless, so it works across serverless invocations)
+- **Uploads:** [Vercel Blob](https://vercel.com/docs/vercel-blob) — the browser uploads photos/videos directly to Blob storage, bypassing the serverless function's request-size limit
+- **Frontend:** Plain HTML/CSS/JS (no framework). A tiny esbuild step bundles the Blob upload client into a plain `<script>` global.
 
-Requires **Node.js 22+** (needed by better-sqlite3).
+Requires **Node.js 20+**.
 
-## Getting started
+## One-time setup on Vercel
+
+1. Import this GitHub repo into a new Vercel project.
+2. Go to the project's **Storage** tab → **Create Database** → choose **Postgres** (this provisions a Neon database and wires up connection env vars automatically, usually `DATABASE_URL`).
+3. Still in **Storage** → **Create Database** → choose **Blob** → connect it to the project (this sets `BLOB_READ_WRITE_TOKEN` automatically).
+4. Go to **Settings → Environment Variables** and add:
+   - `SESSION_SECRET` — any long random string (used to sign login tokens).
+5. Deploy. Vercel runs `npm run build` (bundles the Blob client) automatically per `vercel.json`, then deploys `api/index.js` as the backend and serves `public/` as static files.
+6. Open the deployed URL, register an account, and start completing missions.
+
+No manual database migration step is needed — the app creates its tables and
+seeds the 27 missions automatically on first request after each deploy.
+
+## Local development
+
+Local dev talks to the same real Postgres + Blob resources as production
+(there's no local emulator for either), so pull the project's env vars first:
 
 ```bash
 npm install
+npm run build          # bundles the Blob upload client into public/vendor/
+npx vercel link        # link this folder to your Vercel project (one-time)
+npx vercel env pull .env.local
+export $(cat .env.local | xargs)   # or use a tool like `dotenv-cli`
 npm start
 ```
 
-Then open http://localhost:3000, register an account, and start completing missions.
-
-The server listens on `PORT` (default `3000`). The SQLite database file and
-session secret are created automatically on first run.
+Then open http://localhost:3000.
 
 ## How it works
 
@@ -34,44 +53,26 @@ session secret are created automatically on first run.
   scale with tag difficulty: Easy Mode 5pts → Explorer 10pts → Challenge
   15pts → Chaos 20pts → Final Boss 40pts).
 - Each player can submit **one** proof per mission (image or video, up to
-  100MB). Submitting immediately awards points.
+  100MB — uploaded directly from the browser to Blob storage). Submitting
+  immediately awards points.
 - `/api/leaderboard` ranks players by total points earned.
 
 ## Editing the missions
 
 Update the `raw` array in `server/data/missions.js` — the app re-seeds the
-missions table (upsert by mission number) on every server start, so you can
-freely rename/re-tag/re-point missions and just restart the server.
+missions table (upsert by mission number) on every cold start, so you can
+freely rename/re-tag/re-point missions and just redeploy.
 
-## Deploying
+## Architecture notes
 
-Because the database and uploaded proofs are local files, this app needs a
-host with **persistent disk** — not a serverless/static host like Vercel or
-GitHub Pages. Any of these work well:
-
-| Platform | Why | Persistent storage |
-|---|---|---|
-| **Railway** (easiest) | Deploy straight from GitHub, no CLI needed | Attach a Volume in the dashboard |
-| **Render** | Similar to Railway, generous free web tier (disk requires a paid instance) | Add a Disk in the dashboard |
-| **Fly.io** | More control, CLI-based | `fly volumes create` |
-| Any VPS | Full control, run it with `pm2`/`systemd` | Just a regular directory |
-
-### Environment variables to set in production
-
-- `SESSION_SECRET` — any long random string, so logins survive restarts/redeploys.
-- `DATA_DIR` — an absolute path to your persistent volume's mount point (e.g. `/data`). The SQLite database and uploaded photos/videos are stored under this path. If unset, it defaults to the project folder, which is fine for a VPS but gets wiped on redeploy on platforms like Railway/Render unless a volume is mounted there.
-- `PORT` — most platforms set this for you automatically.
-
-### Railway walkthrough (recommended — no CLI required)
-
-1. Go to [railway.app](https://railway.app) and sign up (GitHub login is easiest).
-2. **New Project → Deploy from GitHub repo** → select `Alysha-InclusiTech/Birthday-Missions`.
-3. Railway auto-detects Node and runs `npm install` + `npm start` — no config needed.
-4. Open the service's **Settings → Volumes** tab, click **New Volume**, and set the mount path to `/data`.
-5. Go to **Variables** and add:
-   - `DATA_DIR` = `/data`
-   - `SESSION_SECRET` = (generate any random string)
-6. Under **Settings → Networking**, click **Generate Domain** to get a public `https://your-app.up.railway.app` URL guests can open on their phones.
-7. Redeploy (Railway usually does this automatically after you save variables/volumes).
-
-That's it — the missions board is now live at that URL for anyone with the link.
+- `server/app.js` holds the actual Express app (routes, middleware) with no
+  `listen()` call. `server/index.js` is the local-dev entry point that calls
+  `listen()`; `api/index.js` is the Vercel entry point that just exports the
+  app for the platform to invoke per-request. `vercel.json` rewrites all
+  `/api/*` requests to that one function.
+- Sessions are stateless signed cookies (JWT), not server-side session
+  storage — necessary because serverless function instances don't share
+  memory between invocations.
+- Large file uploads go straight from the browser to Vercel Blob using a
+  short-lived upload token (`POST /api/missions/upload-token`); the app
+  server never sees the file bytes, only the resulting URL.
